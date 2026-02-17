@@ -1,0 +1,48 @@
+# ============================================================================
+# Ethernal Faucet API - Production Requirements
+# Compatible con titanoboa y deployment tools
+# Python 3.11+
+# ============================================================================
+
+# Core Web Framework
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+pydantic==2.6.1
+pydantic-settings==2.1.0
+
+# ASGI Server
+gunicorn==21.2.0
+
+# Web3 & Blockchain 
+web3==7.14.1
+eth-abi==5.2.0
+eth-account==0.13.7
+
+# Database
+sqlalchemy==2.0.27
+asyncpg==0.29.0
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# Redis & Caching
+redis==5.0.1
+hiredis==2.3.2
+
+# Task Queue
+celery==5.3.6
+flower==2.0.1
+
+# HTTP Client
+httpx==0.26.0
+
+# Configuration
+python-dotenv==1.0.1
+
+# Monitoring
+sentry-sdk[fastapi]==1.40.6
+
+# Security
+cryptography==42.0.2
+
+# Utilities
+python-json-logger==2.0.7
