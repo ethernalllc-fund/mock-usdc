@@ -1,35 +1,57 @@
-"""
-Ethernal MockUSDC Faucet API
-FastAPI backend for automated testnet USDC distribution
-"""
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, Field, validator
 from web3 import Web3
 import logging
+
 from datetime import datetime
 from typing import Optional
-
-from .faucet_service import FaucetService
-from .rate_limiter import RateLimiter
+from contextlib import asynccontextmanager
 from .config import settings
+from .database import init_db, create_tables, close_db, get_db
+from .models import FaucetRequest as DBFaucetRequest
+from .rate_limiter import RateLimiter
+from .faucet_service import FaucetService
 
-# Logging
+if settings.SENTRY_ENABLED and settings.SENTRY_DSN:
+    import sentry_sdk
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+        environment=settings.ENVIRONMENT,
+    )
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, settings.LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# FastAPI app
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"Environment: {settings.ENVIRONMENT}")
+    
+    if settings.ENABLE_DB:
+        init_db()
+        await create_tables()
+        logger.info("Database initialized")
+    
+    yield
+
+    if settings.ENABLE_DB:
+        await close_db()
+    logger.info("Application shutdown complete")
+
 app = FastAPI(
-    title="Ethernal MockUSDC Faucet",
-    description="Automated USDC testnet token distribution",
-    version="1.0.0"
+    title=settings.APP_NAME,
+    description="Production-ready USDC testnet token distribution",
+    version=settings.APP_VERSION,
+    lifespan=lifespan,
 )
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -38,20 +60,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Services
 faucet_service = FaucetService()
 rate_limiter = RateLimiter()
 
-
-class FaucetRequest(BaseModel):
-    address: str
+class FaucetRequestModel(BaseModel):
+    address: str = Field(..., description="Ethereum address")
+    turnstile_token: Optional[str] = Field(None, description="Cloudflare Turnstile token")
     
     @validator('address')
     def validate_address(cls, v):
         if not Web3.is_address(v):
             raise ValueError('Invalid Ethereum address')
         return Web3.to_checksum_address(v)
-
 
 class FaucetResponse(BaseModel):
     success: bool
@@ -61,40 +81,53 @@ class FaucetResponse(BaseModel):
     balance: Optional[float] = None
     wait_time: Optional[int] = None
 
+async def verify_admin_key(request: Request):
+    if not settings.ADMIN_API_KEY:
+        raise HTTPException(status_code=500, detail="Admin API not configured")
+    api_key = request.headers.get(settings.API_KEY_HEADER)
+    if api_key != settings.ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    
+    return True
 
 @app.get("/")
 async def root():
-    """API root - basic info"""
     return {
-        "name": "Ethernal MockUSDC Faucet API",
-        "version": "1.0.0",
+        "name": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "environment": settings.ENVIRONMENT,
         "network": settings.NETWORK_NAME,
         "chain_id": settings.CHAIN_ID,
         "contract": settings.CONTRACT_ADDRESS,
+        "features": {
+            "database": settings.ENABLE_DB,
+            "redis": settings.ENABLE_REDIS,
+            "turnstile": settings.TURNSTILE_ENABLED,
+        },
         "endpoints": {
-            "faucet": "/faucet",
-            "balance": "/balance/{address}",
-            "health": "/health",
-            "stats": "/stats"
+            "faucet": "POST /faucet",
+            "balance": "GET /balance/{address}",
+            "health": "GET /health",
+            "stats": "GET /stats",
+            "admin": "GET /admin/*"
         }
     }
 
-
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     try:
-        # Check RPC connection
         is_connected = faucet_service.w3.is_connected()
-        
-        # Check faucet balance
         faucet_balance = faucet_service.get_balance(settings.FAUCET_ADDRESS)
+        redis_ok = rate_limiter.use_redis
+        status = "healthy" if (is_connected and faucet_balance > 0) else "degraded"
         
         return {
-            "status": "healthy" if is_connected and faucet_balance > 0 else "degraded",
+            "status": status,
             "rpc_connected": is_connected,
             "faucet_balance": faucet_balance,
-            "timestamp": datetime.utcnow().isoformat()
+            "redis_available": redis_ok,
+            "database_enabled": settings.ENABLE_DB,
+            "timestamp": datetime.utcnow().isoformat(),
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -103,38 +136,36 @@ async def health_check():
             content={"status": "unhealthy", "error": str(e)}
         )
 
-
 @app.post("/faucet", response_model=FaucetResponse)
-async def request_tokens(request: Request, faucet_req: FaucetRequest):
-    """
-    Request USDC tokens from faucet
-    
-    Rate limits:
-    - Per IP: 1 request per hour
-    - Per wallet: 1 request per 24 hours
-    """
+async def request_tokens(request: Request, faucet_req: FaucetRequestModel):
     client_ip = request.client.host
     address = faucet_req.address
     
     try:
-        # Check rate limits
-        ip_allowed, ip_wait = rate_limiter.check_ip(client_ip)
-        if not ip_allowed:
-            return FaucetResponse(
-                success=False,
-                message=f"Rate limit exceeded. Try again in {ip_wait} seconds.",
-                wait_time=ip_wait
-            )
+        # Check if rate limiting is enabled
+        if settings.RATE_LIMIT_ENABLED:
+            # Check IP rate limit
+            ip_allowed, ip_wait = rate_limiter.check_ip(client_ip)
+            if not ip_allowed:
+                return FaucetResponse(
+                    success=False,
+                    message=f"Rate limit exceeded. Try again in {ip_wait} seconds.",
+                    wait_time=ip_wait
+                )
+
+            wallet_allowed, wallet_wait = rate_limiter.check_wallet(address)
+            if not wallet_allowed:
+                return FaucetResponse(
+                    success=False,
+                    message=f"Wallet already received tokens recently. Try again in {wallet_wait} seconds.",
+                    wait_time=wallet_wait
+                )
         
-        wallet_allowed, wallet_wait = rate_limiter.check_wallet(address)
-        if not wallet_allowed:
-            return FaucetResponse(
-                success=False,
-                message=f"Wallet already received tokens recently. Try again in {wallet_wait} seconds.",
-                wait_time=wallet_wait
-            )
-        
-        # Check faucet balance
+        # Verify Turnstile token if enabled
+        if settings.TURNSTILE_ENABLED and faucet_req.turnstile_token:
+            # TODO: Implement Turnstile verification
+            pass
+
         faucet_balance = faucet_service.get_balance(settings.FAUCET_ADDRESS)
         if faucet_balance < settings.FAUCET_AMOUNT:
             logger.warning(f"Faucet running low: {faucet_balance} USDC")
@@ -142,16 +173,37 @@ async def request_tokens(request: Request, faucet_req: FaucetRequest):
                 status_code=503,
                 detail="Faucet temporarily unavailable - insufficient balance"
             )
-        
-        # Send tokens
+
+        db_request = None
+        if settings.ENABLE_DB:
+            async with get_db() as db:
+                from sqlalchemy import insert
+                stmt = insert(DBFaucetRequest).values(
+                    wallet_address=address,
+                    ip_address=client_ip,
+                    amount=settings.FAUCET_AMOUNT,
+                    status="processing",
+                )
+                result = await db.execute(stmt)
+                await db.commit()
+
         tx_hash = faucet_service.send_tokens(address, settings.FAUCET_AMOUNT)
-        
-        # Record in rate limiter
         rate_limiter.record_request(client_ip, address)
-        
-        # Get new balance
+
+        if settings.ENABLE_DB and db_request:
+            async with get_db() as db:
+                from sqlalchemy import update
+                stmt = update(DBFaucetRequest).where(
+                    DBFaucetRequest.wallet_address == address
+                ).values(
+                    status="completed",
+                    tx_hash=tx_hash,
+                    completed_at=datetime.utcnow()
+                )
+                await db.execute(stmt)
+                await db.commit()
+
         new_balance = faucet_service.get_balance(address)
-        
         logger.info(
             f"Sent {settings.FAUCET_AMOUNT} USDC to {address} "
             f"(IP: {client_ip}, Tx: {tx_hash})"
@@ -167,16 +219,28 @@ async def request_tokens(request: Request, faucet_req: FaucetRequest):
         
     except Exception as e:
         logger.error(f"Faucet request failed for {address}: {e}")
+        if settings.ENABLE_DB:
+            try:
+                async with get_db() as db:
+                    from sqlalchemy import update
+                    stmt = update(DBFaucetRequest).where(
+                        DBFaucetRequest.wallet_address == address
+                    ).values(
+                        status="failed",
+                        error_message=str(e)
+                    )
+                    await db.execute(stmt)
+                    await db.commit()
+            except:
+                pass
+        
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/balance/{address}")
 async def get_balance(address: str):
-    """Get USDC balance for an address"""
     try:
         if not Web3.is_address(address):
             raise HTTPException(status_code=400, detail="Invalid address")
-        
         checksum_address = Web3.to_checksum_address(address)
         balance = faucet_service.get_balance(checksum_address)
         
@@ -190,10 +254,8 @@ async def get_balance(address: str):
         logger.error(f"Balance check failed for {address}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/stats")
 async def get_stats():
-    """Get faucet statistics"""
     try:
         stats = rate_limiter.get_stats()
         faucet_balance = faucet_service.get_balance(settings.FAUCET_ADDRESS)
@@ -204,6 +266,7 @@ async def get_stats():
             "unique_wallets": stats["unique_wallets"],
             "unique_ips": stats["unique_ips"],
             "amount_per_request": settings.FAUCET_AMOUNT,
+            "using_redis": stats["using_redis"],
             "rate_limits": {
                 "per_ip_seconds": settings.RATE_LIMIT_IP_SECONDS,
                 "per_wallet_seconds": settings.RATE_LIMIT_WALLET_SECONDS
@@ -213,6 +276,36 @@ async def get_stats():
         logger.error(f"Stats retrieval failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/admin/stats", dependencies=[Depends(verify_admin_key)])
+async def admin_stats():
+    try:
+        if not settings.ENABLE_DB:
+            raise HTTPException(status_code=501, detail="Database not enabled")
+        
+        async with get_db() as db:
+            from sqlalchemy import select, func
+            
+            # Total requests
+            stmt = select(func.count(DBFaucetRequest.id))
+            result = await db.execute(stmt)
+            total = result.scalar()
+            
+            # By status
+            stmt = select(
+                DBFaucetRequest.status,
+                func.count(DBFaucetRequest.id)
+            ).group_by(DBFaucetRequest.status)
+            result = await db.execute(stmt)
+            by_status = dict(result.all())
+            
+            return {
+                "total_requests": total,
+                "by_status": by_status,
+                "faucet_balance": faucet_service.get_balance(settings.FAUCET_ADDRESS),
+            }
+    except Exception as e:
+        logger.error(f"Admin stats failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -222,13 +315,12 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"detail": "Internal server error"}
     )
 
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
+        "api.main:app",
+        host=settings.API_HOST,
+        port=settings.API_PORT,
+        reload=settings.DEBUG,
+        log_level=settings.LOG_LEVEL.lower(),
     )
