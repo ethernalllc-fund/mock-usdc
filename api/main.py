@@ -29,15 +29,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# CORS — Orígenes permitidos
-# Cubre:
-#   1. Los orígenes explícitos de settings.CORS_ORIGINS (env var)
-#   2. Cualquier preview URL de Vercel del proyecto (*.vercel.app)
-#   3. Localhost para desarrollo local
-# ============================================================
-
-# Patrones de Vercel previews para este proyecto
 VERCEL_PREVIEW_PATTERNS = [
     re.compile(r"^https://frontend-[a-z0-9]+-ethernalllc-funds-projects\.vercel\.app$"),
     re.compile(r"^https://frontend-git-[a-zA-Z0-9\-]+-ethernalllc-funds-projects\.vercel\.app$"),
@@ -48,14 +39,11 @@ LOCALHOST_PATTERN = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
 def is_origin_allowed(origin: str) -> bool:
     if not origin:
         return False
-    # 1. Orígenes explícitos configurados en env var
     if origin in settings.CORS_ORIGINS:
         return True
-    # 2. Previews de Vercel del proyecto
     for pattern in VERCEL_PREVIEW_PATTERNS:
         if pattern.match(origin):
             return True
-    # 3. Localhost (solo en desarrollo)
     if settings.ENVIRONMENT != "production" and LOCALHOST_PATTERN.match(origin):
         return True
     return False
@@ -84,7 +72,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Middleware CORS personalizado — maneja allow_origin dinámicamente
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
@@ -92,8 +79,6 @@ class DynamicCORSMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         origin = request.headers.get("origin", "")
         allowed = is_origin_allowed(origin)
-
-        # Preflight OPTIONS
         if request.method == "OPTIONS":
             if allowed:
                 return Response(
@@ -109,7 +94,6 @@ class DynamicCORSMiddleware(BaseHTTPMiddleware):
             else:
                 logger.warning(f"CORS preflight rejected for origin: {origin}")
                 return Response(status_code=403)
-
         response = await call_next(request)
 
         if allowed and origin:
@@ -121,7 +105,6 @@ class DynamicCORSMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(DynamicCORSMiddleware)
-
 faucet_service = FaucetService()
 rate_limiter = RateLimiter()
 
@@ -338,10 +321,8 @@ async def admin_stats():
     try:
         if not settings.ENABLE_DB:
             raise HTTPException(status_code=501, detail="Database not enabled")
-
         async with get_db() as db:
             from sqlalchemy import select, func
-
             stmt = select(func.count(DBFaucetRequest.id))
             result = await db.execute(stmt)
             total = result.scalar()
