@@ -21,7 +21,7 @@ eth-account==0.13.7
 # Database
 sqlalchemy==2.0.41
 asyncpg==0.31.0
-alembic==1.18.
+alembic==1.18.4
 psycopg2-binary==2.9.11
 
 # Redis & Caching
