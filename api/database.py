@@ -2,6 +2,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.pool import NullPool
 from contextlib import asynccontextmanager
 import logging
+import ssl
 
 from .config import settings
 from .models import Base
@@ -22,13 +23,22 @@ def init_db():
         db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
     elif db_url.startswith("postgresql://"):
         db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    
+
+    # SSL context forzado para Supabase + compatibilidad con Render free tier (IPv4)
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
     engine = create_async_engine(
         db_url,
         echo=settings.DB_ECHO,
         pool_size=settings.DB_POOL_SIZE,
         max_overflow=settings.DB_MAX_OVERFLOW,
         poolclass=NullPool if settings.ENVIRONMENT == "test" else None,
+        connect_args={
+            "ssl": ssl_context,
+            "server_settings": {"client_encoding": "utf8"},
+        }
     )
     
     async_session_maker = async_sessionmaker(
