@@ -1,0 +1,12 @@
+[tool.poetry]
+name = "ethernal-faucet-api"
+version = "0.1.0"
+description = "Ethernal Faucet API"
+authors = []
+
+[tool.poetry.dependencies]
+python = "~3.12.3"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
