@@ -1,18 +1,65 @@
 services:
   - type: web
     name: ethernal-faucet-api
-    env: python 3.12.3
-    buildCommand: pip install -r requirements-production-v2.txt
-    startCommand: gunicorn api.main:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT
-    
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn api.main:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 120
+
     envVars:
-      - key: DATABASE_URL
-        sync: false
-      - key: REDIS_URL
-        sync: false
+      - key: RPC_URL
+        value: https://sepolia-rollup.arbitrum.io/rpc
+      - key: CHAIN_ID
+        value: "421614"
+      - key: NETWORK_NAME
+        value: Arbitrum Sepolia
+      - key: EXPLORER_URL
+        value: https://sepolia.arbiscan.io
+
+      - key: CONTRACT_ADDRESS
+        value: "0x6e1371974D923397ecE9eE7525ac50ad7087c77f"
+      - key: FAUCET_ADDRESS
+        value: "0xFc1bA574c1622A1b116dFeFEE2215F3F53bB2c51"
       - key: FAUCET_PRIVATE_KEY
-        sync: false
+        sync: false   
+
+      - key: FAUCET_AMOUNT
+        value: "100"
+      - key: FAUCET_MIN_BALANCE_ALERT
+        value: "1000"
+
+      - key: RATE_LIMIT_ENABLED
+        value: "true"
+      - key: RATE_LIMIT_IP_SECONDS
+        value: "3600"
+      - key: RATE_LIMIT_WALLET_SECONDS
+        value: "86400"
+
+      - key: DATABASE_URL
+        sync: false  
+      - key: ENABLE_DB
+        value: "true"
+
+      - key: REDIS_URL
+        sync: false  
+      - key: ENABLE_REDIS
+        value: "false" 
+
+      - key: CORS_ORIGINS
+        value: "https://frontend-git-main-ethernalllc-funds-projects.vercel.app,http://localhost:5173,http://localhost:3000"
+
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DEBUG
+        value: "false"
+      - key: PYTHON_VERSION
+        value: "3.12.3"
+
       - key: ADMIN_API_KEY
-        sync: false
+        sync: false  
+
+      - key: SENTRY_ENABLED
+        value: "false"
       - key: SENTRY_DSN
         sync: false

@@ -1,7 +1,7 @@
 # ============================================================================
 # Ethernal Faucet API - Production Requirements
 # Compatible con titanoboa y deployment tools
-# Python 3.12.3+
+# Python 3.14.3
 # ============================================================================
 
 # Core Web Framework
