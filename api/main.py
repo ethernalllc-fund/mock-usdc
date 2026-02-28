@@ -29,35 +29,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-VERCEL_PREVIEW_PATTERNS = [
-    re.compile(r"^https://frontend-[a-z0-9]+-ethernalllc-funds-projects\.vercel\.app$"),
-    re.compile(r"^https://frontend-git-[a-zA-Z0-9\-]+-ethernalllc-funds-projects\.vercel\.app$"),
+PRODUCTION_ORIGINS = [
+    "https://www.ethernal.fund",
+    "https://ethernal.fund",
 ]
 
-LOCALHOST_PATTERN = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+VERCEL_PREVIEW_PATTERN = re.compile(
+    r"^https://[\w\-]+-ethernalllc-funds-projects\.vercel\.app$"
+)
+
+def build_allowed_origins() -> list[str]:
+    origins = list(PRODUCTION_ORIGINS)
+    if settings.CORS_ORIGINS_STR:
+        extra = [o.strip() for o in settings.CORS_ORIGINS_STR.split(",") if o.strip()]
+        for o in extra:
+            if o not in origins:
+                origins.append(o)
+    if settings.ENVIRONMENT != "production":
+        origins += [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+        ]
+    return origins
 
 def is_origin_allowed(origin: str) -> bool:
     if not origin:
         return False
-    if origin in settings.CORS_ORIGINS:
+    allowed = build_allowed_origins()
+    if origin in allowed:
         return True
-    for pattern in VERCEL_PREVIEW_PATTERNS:
-        if pattern.match(origin):
-            return True
-    if settings.ENVIRONMENT != "production" and LOCALHOST_PATTERN.match(origin):
+    if VERCEL_PREVIEW_PATTERN.match(origin):
         return True
     return False
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Environment: {settings.ENVIRONMENT}")
+    logger.info(f"Allowed CORS origins: {build_allowed_origins()}")
 
     if settings.ENABLE_DB:
         init_db()
         await create_tables()
         logger.info("Database initialized")
+    else:
+        logger.warning("Database disabled - using in-memory rate limiting only")
 
     yield
 
@@ -72,39 +90,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=PRODUCTION_ORIGINS + [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+    ],
+    allow_origin_regex=(
+        r"https://[\w\-]+-ethernalllc-funds-projects\.vercel\.app"
+        r"|https://ethernal\.fund"
+        r"|https://www\.ethernal\.fund"
+    ),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class DynamicCORSMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        origin = request.headers.get("origin", "")
-        allowed = is_origin_allowed(origin)
-        if request.method == "OPTIONS":
-            if allowed:
-                return Response(
-                    status_code=200,
-                    headers={
-                        "Access-Control-Allow-Origin": origin,
-                        "Access-Control-Allow-Credentials": "true",
-                        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-                        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
-                        "Access-Control-Max-Age": "86400",
-                    }
-                )
-            else:
-                logger.warning(f"CORS preflight rejected for origin: {origin}")
-                return Response(status_code=403)
-        response = await call_next(request)
-
-        if allowed and origin:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-API-Key"
-        
-        return response
-
-app.add_middleware(DynamicCORSMiddleware)
 faucet_service = FaucetService()
 rate_limiter = RateLimiter()
 
@@ -204,7 +207,7 @@ async def request_tokens(request: Request, faucet_req: FaucetRequestModel):
                 )
 
         if settings.TURNSTILE_ENABLED and faucet_req.turnstile_token:
-            pass  # TODO: Implement Turnstile verification
+            pass  
 
         faucet_balance = faucet_service.get_balance(settings.FAUCET_ADDRESS)
         if faucet_balance < settings.FAUCET_AMOUNT:
@@ -214,7 +217,6 @@ async def request_tokens(request: Request, faucet_req: FaucetRequestModel):
                 detail="Faucet temporarily unavailable - insufficient balance"
             )
 
-        db_request = None
         if settings.ENABLE_DB:
             async with get_db() as db:
                 from sqlalchemy import insert
@@ -224,21 +226,24 @@ async def request_tokens(request: Request, faucet_req: FaucetRequestModel):
                     amount=settings.FAUCET_AMOUNT,
                     status="processing",
                 )
-                result = await db.execute(stmt)
+                await db.execute(stmt)
                 await db.commit()
 
         tx_hash = faucet_service.send_tokens(address, settings.FAUCET_AMOUNT)
         rate_limiter.record_request(client_ip, address)
 
-        if settings.ENABLE_DB and db_request:
+        if settings.ENABLE_DB:
             async with get_db() as db:
                 from sqlalchemy import update
-                stmt = update(DBFaucetRequest).where(
-                    DBFaucetRequest.wallet_address == address
-                ).values(
-                    status="completed",
-                    tx_hash=tx_hash,
-                    completed_at=datetime.utcnow()
+                stmt = (
+                    update(DBFaucetRequest)
+                    .where(DBFaucetRequest.wallet_address == address)
+                    .where(DBFaucetRequest.status == "processing")
+                    .values(
+                        status="completed",
+                        tx_hash=tx_hash,
+                        completed_at=datetime.utcnow(),
+                    )
                 )
                 await db.execute(stmt)
                 await db.commit()
@@ -254,26 +259,27 @@ async def request_tokens(request: Request, faucet_req: FaucetRequestModel):
             message=f"Successfully sent {settings.FAUCET_AMOUNT} USDC",
             tx_hash=tx_hash,
             amount=settings.FAUCET_AMOUNT,
-            balance=new_balance
+            balance=new_balance,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Faucet request failed for {address}: {e}")
         if settings.ENABLE_DB:
             try:
                 async with get_db() as db:
                     from sqlalchemy import update
-                    stmt = update(DBFaucetRequest).where(
-                        DBFaucetRequest.wallet_address == address
-                    ).values(
-                        status="failed",
-                        error_message=str(e)
+                    stmt = (
+                        update(DBFaucetRequest)
+                        .where(DBFaucetRequest.wallet_address == address)
+                        .where(DBFaucetRequest.status == "processing")
+                        .values(status="failed", error_message=str(e))
                     )
                     await db.execute(stmt)
                     await db.commit()
             except Exception:
                 pass
-
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/balance/{address}")
@@ -283,23 +289,24 @@ async def get_balance(address: str):
             raise HTTPException(status_code=400, detail="Invalid address")
         checksum_address = Web3.to_checksum_address(address)
         balance = faucet_service.get_balance(checksum_address)
-
         return {
             "address": checksum_address,
             "balance": balance,
             "symbol": "USDC",
-            "decimals": 6
+            "decimals": 6,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Balance check failed for {address}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/stats")
 async def get_stats():
     try:
         stats = rate_limiter.get_stats()
         faucet_balance = faucet_service.get_balance(settings.FAUCET_ADDRESS)
-
         return {
             "faucet_balance": faucet_balance,
             "total_requests": stats["total_requests"],
@@ -309,8 +316,8 @@ async def get_stats():
             "using_redis": stats["using_redis"],
             "rate_limits": {
                 "per_ip_seconds": settings.RATE_LIMIT_IP_SECONDS,
-                "per_wallet_seconds": settings.RATE_LIMIT_WALLET_SECONDS
-            }
+                "per_wallet_seconds": settings.RATE_LIMIT_WALLET_SECONDS,
+            },
         }
     except Exception as e:
         logger.error(f"Stats retrieval failed: {e}")
@@ -329,7 +336,7 @@ async def admin_stats():
 
             stmt = select(
                 DBFaucetRequest.status,
-                func.count(DBFaucetRequest.id)
+                func.count(DBFaucetRequest.id),
             ).group_by(DBFaucetRequest.status)
             result = await db.execute(stmt)
             by_status = dict(result.all())
@@ -339,6 +346,8 @@ async def admin_stats():
                 "by_status": by_status,
                 "faucet_balance": faucet_service.get_balance(settings.FAUCET_ADDRESS),
             }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Admin stats failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -348,7 +357,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error"}
+        content={"detail": "Internal server error"},
     )
 
 if __name__ == "__main__":
