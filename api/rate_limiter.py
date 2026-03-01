@@ -24,7 +24,6 @@ class RateLimiter:
                     decode_responses=settings.REDIS_DECODE_RESPONSES,
                     max_connections=settings.REDIS_MAX_CONNECTIONS,
                 )
-                # Test connection
                 self.redis_client.ping()
                 logger.info("Redis rate limiter initialized")
             except Exception as e:

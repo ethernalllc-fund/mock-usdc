@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     CONTRACT_ADDRESS: str = Field(default="", env="CONTRACT_ADDRESS")
     FAUCET_ADDRESS: str = Field(default="", env="FAUCET_ADDRESS")
     FAUCET_PRIVATE_KEY: str = Field(default="", env="FAUCET_PRIVATE_KEY")
+    FAUCET_ETH_AMOUNT: float = Field(default=0.1, env="FAUCET_ETH_AMOUNT")
 
     @validator("CONTRACT_ADDRESS", "FAUCET_ADDRESS")
     def validate_addresses(cls, v):
@@ -30,9 +31,9 @@ class Settings(BaseSettings):
             raise ValueError("Address must start with 0x")
         return v
 
-    FAUCET_AMOUNT: float = Field(default=100.0, env="FAUCET_AMOUNT")
+    FAUCET_AMOUNT: float = Field(default=10000.0, env="FAUCET_AMOUNT")
     FAUCET_MIN_BALANCE_ALERT: float = Field(
-        default=1000.0,
+        default=10000.0,
         env="FAUCET_MIN_BALANCE_ALERT"
     )
 

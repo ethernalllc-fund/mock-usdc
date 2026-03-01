@@ -125,7 +125,9 @@ class FaucetResponse(BaseModel):
     success: bool
     message: str
     tx_hash: Optional[str] = None
+    eth_tx_hash: Optional[str] = None
     amount: Optional[float] = None
+    eth_amount: Optional[float] = None
     balance: Optional[float] = None
     wait_time: Optional[int] = None
 
@@ -165,13 +167,15 @@ async def health_check():
     try:
         is_connected = faucet_service.w3.is_connected()
         faucet_balance = faucet_service.get_balance(settings.FAUCET_ADDRESS)
+        faucet_eth_balance = faucet_service.get_eth_balance(settings.FAUCET_ADDRESS)
         redis_ok = rate_limiter.use_redis
         status = "healthy" if (is_connected and faucet_balance > 0) else "degraded"
 
         return {
             "status": status,
             "rpc_connected": is_connected,
-            "faucet_balance": faucet_balance,
+            "faucet_usdc_balance": faucet_balance,
+            "faucet_eth_balance": faucet_eth_balance,
             "redis_available": redis_ok,
             "database_enabled": settings.ENABLE_DB,
             "timestamp": datetime.utcnow().isoformat(),
@@ -207,14 +211,14 @@ async def request_tokens(request: Request, faucet_req: FaucetRequestModel):
                 )
 
         if settings.TURNSTILE_ENABLED and faucet_req.turnstile_token:
-            pass  
+            pass
 
         faucet_balance = faucet_service.get_balance(settings.FAUCET_ADDRESS)
         if faucet_balance < settings.FAUCET_AMOUNT:
             logger.warning(f"Faucet running low: {faucet_balance} USDC")
             raise HTTPException(
                 status_code=503,
-                detail="Faucet temporarily unavailable - insufficient balance"
+                detail="Faucet temporarily unavailable - insufficient USDC balance"
             )
 
         if settings.ENABLE_DB:
@@ -229,7 +233,20 @@ async def request_tokens(request: Request, faucet_req: FaucetRequestModel):
                 await db.execute(stmt)
                 await db.commit()
 
+        # Enviar USDC
         tx_hash = faucet_service.send_tokens(address, settings.FAUCET_AMOUNT)
+        logger.info(f"Sent {settings.FAUCET_AMOUNT} USDC to {address} (IP: {client_ip}, Tx: {tx_hash})")
+
+        # Enviar ETH
+        eth_tx_hash = None
+        eth_amount = settings.FAUCET_ETH_AMOUNT
+        try:
+            eth_tx_hash = faucet_service.send_eth(address, eth_amount)
+            logger.info(f"Sent {eth_amount} ETH to {address} (Tx: {eth_tx_hash})")
+        except Exception as e:
+            logger.warning(f"ETH send failed for {address}: {e}")
+            eth_tx_hash = None
+
         rate_limiter.record_request(client_ip, address)
 
         if settings.ENABLE_DB:
@@ -249,16 +266,14 @@ async def request_tokens(request: Request, faucet_req: FaucetRequestModel):
                 await db.commit()
 
         new_balance = faucet_service.get_balance(address)
-        logger.info(
-            f"Sent {settings.FAUCET_AMOUNT} USDC to {address} "
-            f"(IP: {client_ip}, Tx: {tx_hash})"
-        )
 
         return FaucetResponse(
             success=True,
-            message=f"Successfully sent {settings.FAUCET_AMOUNT} USDC",
+            message=f"Successfully sent {settings.FAUCET_AMOUNT} USDC and {eth_amount} ETH",
             tx_hash=tx_hash,
+            eth_tx_hash=eth_tx_hash,
             amount=settings.FAUCET_AMOUNT,
+            eth_amount=eth_amount,
             balance=new_balance,
         )
 
@@ -289,11 +304,13 @@ async def get_balance(address: str):
             raise HTTPException(status_code=400, detail="Invalid address")
         checksum_address = Web3.to_checksum_address(address)
         balance = faucet_service.get_balance(checksum_address)
+        eth_balance = faucet_service.get_eth_balance(checksum_address)
         return {
             "address": checksum_address,
             "balance": balance,
             "symbol": "USDC",
             "decimals": 6,
+            "eth_balance": eth_balance,
         }
     except HTTPException:
         raise
@@ -307,12 +324,15 @@ async def get_stats():
     try:
         stats = rate_limiter.get_stats()
         faucet_balance = faucet_service.get_balance(settings.FAUCET_ADDRESS)
+        faucet_eth_balance = faucet_service.get_eth_balance(settings.FAUCET_ADDRESS)
         return {
-            "faucet_balance": faucet_balance,
+            "faucet_usdc_balance": faucet_balance,
+            "faucet_eth_balance": faucet_eth_balance,
             "total_requests": stats["total_requests"],
             "unique_wallets": stats["unique_wallets"],
             "unique_ips": stats["unique_ips"],
             "amount_per_request": settings.FAUCET_AMOUNT,
+            "eth_amount_per_request": settings.FAUCET_ETH_AMOUNT,
             "using_redis": stats["using_redis"],
             "rate_limits": {
                 "per_ip_seconds": settings.RATE_LIMIT_IP_SECONDS,
@@ -344,7 +364,8 @@ async def admin_stats():
             return {
                 "total_requests": total,
                 "by_status": by_status,
-                "faucet_balance": faucet_service.get_balance(settings.FAUCET_ADDRESS),
+                "faucet_usdc_balance": faucet_service.get_balance(settings.FAUCET_ADDRESS),
+                "faucet_eth_balance": faucet_service.get_eth_balance(settings.FAUCET_ADDRESS),
             }
     except HTTPException:
         raise

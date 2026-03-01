@@ -75,6 +75,7 @@ class FaucetService:
 
         self.account = self.w3.eth.account.from_key(self.private_key)
         logger.info(f"Faucet wallet: {self.account.address}")
+
         self.contract_address = os.getenv("CONTRACT_ADDRESS")
         if not self.contract_address:
             deployed_path = Path(__file__).parent.parent / "out" / "deployed_address.json"
@@ -86,6 +87,7 @@ class FaucetService:
                 raise ValueError(
                     "CONTRACT_ADDRESS env var not set and no deployed_address.json found"
                 )
+
         abi_path = Path(__file__).parent.parent / "out" / "MockUSDC.json"
         if abi_path.exists():
             with open(abi_path) as f:
@@ -117,6 +119,14 @@ class FaucetService:
             logger.error(f"Balance check failed for {address}: {e}")
             raise
 
+    def get_eth_balance(self, address: str) -> float:
+        try:
+            balance_wei = self.w3.eth.get_balance(Web3.to_checksum_address(address))
+            return float(self.w3.from_wei(balance_wei, 'ether'))
+        except Exception as e:
+            logger.error(f"ETH balance check failed for {address}: {e}")
+            raise
+
     def send_tokens(self, to_address: str, amount: float) -> str:
         try:
             to_address = Web3.to_checksum_address(to_address)
@@ -137,6 +147,7 @@ class FaucetService:
             base_fee = latest_block['baseFeePerGas']
             max_priority_fee = self.w3.to_wei(0.1, 'gwei')
             max_fee_per_gas = base_fee * 2 + max_priority_fee
+
             tx = self.contract.functions.faucet(
                 to_address,
                 amount_wei
@@ -153,10 +164,8 @@ class FaucetService:
             tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
             logger.info(f"Sent {amount} USDC to {to_address}, tx: {tx_hash.hex()}")
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
-
             if receipt.status != 1:
                 raise Exception("Transaction reverted on-chain")
-
             return tx_hash.hex()
 
         except ContractLogicError as e:
@@ -164,4 +173,35 @@ class FaucetService:
             raise Exception(f"Contract error: {str(e)}")
         except Exception as e:
             logger.error(f"Error sending to {to_address}: {e}")
+            raise
+
+    def send_eth(self, to_address: str, amount_eth: float) -> str:
+        try:
+            to_address = Web3.to_checksum_address(to_address)
+            amount_wei = self.w3.to_wei(amount_eth, 'ether')
+            latest_block = self.w3.eth.get_block('latest')
+            base_fee = latest_block['baseFeePerGas']
+            max_priority_fee = self.w3.to_wei(0.1, 'gwei')
+            max_fee_per_gas = base_fee * 2 + max_priority_fee
+            tx = {
+                'chainId': int(os.getenv("CHAIN_ID", "421614")),
+                'from': self.account.address,
+                'to': to_address,
+                'value': amount_wei,
+                'nonce': self.w3.eth.get_transaction_count(self.account.address),
+                'gas': 21000,
+                'maxFeePerGas': max_fee_per_gas,
+                'maxPriorityFeePerGas': max_priority_fee,
+            }
+
+            signed = self.w3.eth.account.sign_transaction(tx, self.private_key)
+            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+            logger.info(f"Sent {amount_eth} ETH to {to_address}, tx: {tx_hash.hex()}")
+            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+            if receipt.status != 1:
+                raise Exception("ETH transaction reverted on-chain")
+            return tx_hash.hex()
+
+        except Exception as e:
+            logger.error(f"Error sending ETH to {to_address}: {e}")
             raise

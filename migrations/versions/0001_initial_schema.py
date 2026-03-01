@@ -6,7 +6,6 @@ Create Date: 2026-02-28 00:00:00.000000
 
 """
 from typing import Sequence, Union
-
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -16,9 +15,7 @@ down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-
 def upgrade() -> None:
-    # ── faucet_requests ───────────────────────────────────────────────────────
     op.create_table(
         'faucet_requests',
         sa.Column('id', sa.Integer(), nullable=False),
@@ -46,7 +43,6 @@ def upgrade() -> None:
     op.create_index('idx_ip_created', 'faucet_requests', ['ip_address', 'created_at'], unique=False)
     op.create_index('idx_status_created', 'faucet_requests', ['status', 'created_at'], unique=False)
 
-    # ── blocked_addresses ─────────────────────────────────────────────────────
     op.create_table(
         'blocked_addresses',
         sa.Column('id', sa.Integer(), nullable=False),
@@ -64,7 +60,6 @@ def upgrade() -> None:
     op.create_index(op.f('ix_blocked_addresses_address_value'), 'blocked_addresses', ['address_value'], unique=True)
     op.create_index(op.f('ix_blocked_addresses_is_active'), 'blocked_addresses', ['is_active'], unique=False)
 
-    # ── faucet_stats ──────────────────────────────────────────────────────────
     op.create_table(
         'faucet_stats',
         sa.Column('id', sa.Integer(), nullable=False),
